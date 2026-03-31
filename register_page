@@ -1,0 +1,826 @@
+"""
+register_view.py — ShieldYourInsurance
+Clean Stepper Registration  |  PyQt6  |  3 Steps  |  Role-aware fields
+
+Step 1 — Account      : role, email, username, password, confirm password
+Step 2 — Personal     : name, DOB, gender, phone, address, ID type/number
+Step 3 — Role-Specific:
+          Customer  -> policy interest, occupation, beneficiary, emergency contact
+          Agent     -> license no, branch, specialization, commission rate, supervisor
+          Admin     -> department, employee ID, access level, supervisor
+"""
+
+import sys
+import re
+import bcrypt
+import mysql.connector
+from mysql.connector import Error
+
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton, QLineEdit,
+    QVBoxLayout, QHBoxLayout, QFrame, QComboBox, QStackedWidget,
+    QGraphicsDropShadowEffect, QSizePolicy, QMessageBox, QDateEdit
+)
+from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve, pyqtSignal, QTimer, QDate
+from PyQt6.QtGui import QFont, QColor, QPainter, QBrush, QRadialGradient, QCursor
+
+
+# ─────────────────────────────────────────────────────
+#  THEME
+# ─────────────────────────────────────────────────────
+class T:
+    BG             = "#FAFBFF"
+    WHITE          = "#FFFFFF"
+    BLUE           = "#4361EE"
+    BLUE_DARK      = "#3451D1"
+    BLUE_LIGHT     = "#7C6FFF"
+    NAVY           = "#1A1D2E"
+    MUTED          = "#9DA3B4"
+    BORDER         = "#EEF0F6"
+    BORDER_FOCUS   = "#4361EE"
+    ERROR          = "#E55858"
+    ROLE_ACTIVE_BG = "#F0F3FF"
+    ROLE_ACTIVE_BD = "#4361EE"
+    ROLE_ACTIVE_FG = "#4361EE"
+    ROLE_IDLE_BD   = "#EEF0F6"
+    ROLE_IDLE_FG   = "#9DA3B4"
+
+
+# ─────────────────────────────────────────────────────
+#  DATABASE — insert new user
+# ─────────────────────────────────────────────────────
+DB_CONFIG = {
+    "host": "localhost", "port": 3306,
+    "database": "insurance_db",
+    "user": "app_user", "password": "your_password",
+}
+
+def register_user(data: dict) -> tuple:
+    """Returns (True, 'success') or (False, 'error message')."""
+    try:
+        conn   = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM users WHERE email = %s", (data["email"],))
+        if cursor.fetchone():
+            return False, "An account with this email already exists."
+        hashed = bcrypt.hashpw(data["password"].encode(), bcrypt.gensalt()).decode()
+        cursor.execute("""
+            INSERT INTO users (full_name, email, password, role, is_active, created_at)
+            VALUES (%s, %s, %s, %s, 1, NOW())
+        """, (data["full_name"], data["email"], hashed, data["role"].lower()))
+        user_id = cursor.lastrowid
+        if data["role"].lower() == "customer":
+            cursor.execute("""
+                INSERT INTO clients (user_id, agent_id, full_name, dob, phone, email, address, created_at)
+                VALUES (%s, 1, %s, %s, %s, %s, %s, NOW())
+            """, (user_id, data["full_name"], data.get("dob"), data.get("phone",""),
+                  data["email"], data.get("address","")))
+        conn.commit(); cursor.close(); conn.close()
+        return True, "success"
+    except Error as e:
+        print(f"[DEMO] DB not connected ({e}) — would register {data['email']} as {data['role']}")
+        return True, "demo"
+
+
+# ─────────────────────────────────────────────────────
+#  REUSABLE WIDGETS
+# ─────────────────────────────────────────────────────
+class FieldLabel(QLabel):
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setStyleSheet(f"color:{T.NAVY}; font-size:11px; font-weight:700;"
+                           f"font-family:'Segoe UI'; letter-spacing:0.3px;")
+
+
+class StyledInput(QLineEdit):
+    def __init__(self, placeholder="", password=False, parent=None):
+        super().__init__(parent)
+        self.setPlaceholderText(placeholder)
+        self.setFixedHeight(44)
+        if password:
+            self.setEchoMode(QLineEdit.EchoMode.Password)
+        self._err = False
+        self._apply(False)
+
+    def focusInEvent(self, e):  self._apply(True);  super().focusInEvent(e)
+    def focusOutEvent(self, e): self._apply(False); super().focusOutEvent(e)
+
+    def set_error(self, v: bool):
+        self._err = v; self._apply(self.hasFocus())
+
+    def _apply(self, focused):
+        b = T.ERROR if self._err else (T.BORDER_FOCUS if focused else T.BORDER)
+        self.setStyleSheet(f"""
+            QLineEdit {{
+                border:1.5px solid {b}; border-radius:9px;
+                padding:0 13px; font-size:13px; color:{T.NAVY};
+                background:{T.WHITE}; font-family:'Segoe UI';
+            }}
+        """)
+
+
+class StyledCombo(QComboBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(44)
+        self.setStyleSheet(f"""
+            QComboBox {{
+                border:1.5px solid {T.BORDER}; border-radius:9px;
+                padding:0 13px; font-size:13px; color:{T.NAVY};
+                background:{T.WHITE}; font-family:'Segoe UI';
+            }}
+            QComboBox:focus {{ border-color:{T.BLUE}; }}
+            QComboBox::drop-down {{ border:none; width:28px; }}
+            QComboBox::down-arrow {{
+                border-left:4px solid transparent;
+                border-right:4px solid transparent;
+                border-top:5px solid {T.MUTED};
+                margin-right:10px;
+            }}
+            QComboBox QAbstractItemView {{
+                border:1px solid {T.BORDER}; border-radius:8px;
+                background:{T.WHITE};
+                selection-background-color:{T.ROLE_ACTIVE_BG};
+                selection-color:{T.BLUE};
+                font-size:13px; padding:4px;
+            }}
+        """)
+
+
+class StyledDate(QDateEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(44)
+        self.setCalendarPopup(True)
+        self.setDate(QDate(1990, 1, 1))
+        self.setDisplayFormat("dd / MM / yyyy")
+        self.setStyleSheet(f"""
+            QDateEdit {{
+                border:1.5px solid {T.BORDER}; border-radius:9px;
+                padding:0 13px; font-size:13px; color:{T.NAVY};
+                background:{T.WHITE}; font-family:'Segoe UI';
+            }}
+            QDateEdit:focus {{ border-color:{T.BLUE}; }}
+            QDateEdit::drop-down {{ border:none; width:28px; }}
+        """)
+
+
+def _pair(w1, w2, spacing=12):
+    h = QHBoxLayout(); h.setSpacing(spacing)
+    h.addWidget(w1); h.addWidget(w2)
+    return h
+
+def _col(label_text, widget):
+    v = QVBoxLayout(); v.setSpacing(5)
+    v.addWidget(FieldLabel(label_text)); v.addWidget(widget)
+    return v
+
+
+# ─────────────────────────────────────────────────────
+#  STEP INDICATOR
+# ─────────────────────────────────────────────────────
+class StepIndicator(QWidget):
+    LABELS = ["Account", "Personal", "Details"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(58)
+        self._step = 0
+        self._dots = []; self._lines = []; self._lbls = []
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0)
+
+        for i, name in enumerate(self.LABELS):
+            dot = QLabel(str(i+1))
+            dot.setFixedSize(28, 28)
+            dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl = QLabel(name)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._dots.append(dot); self._lbls.append(lbl)
+
+            col = QVBoxLayout(); col.setSpacing(4)
+            col.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            col.addWidget(dot, 0, Qt.AlignmentFlag.AlignHCenter)
+            col.addWidget(lbl, 0, Qt.AlignmentFlag.AlignHCenter)
+            w = QWidget(); w.setLayout(col)
+            layout.addWidget(w)
+
+            if i < len(self.LABELS) - 1:
+                line = QFrame(); line.setFixedHeight(2)
+                line.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                self._lines.append(line); layout.addWidget(line)
+
+        self._refresh()
+
+    def set_step(self, step):
+        self._step = step; self._refresh()
+
+    def _refresh(self):
+        for i, (dot, lbl) in enumerate(zip(self._dots, self._lbls)):
+            done   = i < self._step
+            active = i == self._step
+            dot.setText("✓" if done else str(i+1))
+            if done or active:
+                glow = "border:3px solid rgba(67,97,238,0.25);" if active else ""
+                dot.setStyleSheet(f"background:{T.BLUE}; color:white; border-radius:14px;"
+                                  f"font-size:11px; font-weight:800; font-family:'Segoe UI'; {glow}")
+                lbl.setStyleSheet(f"color:{T.NAVY}; font-size:10px; font-weight:700; font-family:'Segoe UI';")
+            else:
+                dot.setStyleSheet(f"background:#EEF0F6; color:{T.MUTED}; border-radius:14px;"
+                                  f"font-size:11px; font-weight:800; font-family:'Segoe UI';")
+                lbl.setStyleSheet(f"color:{T.MUTED}; font-size:10px; font-weight:600; font-family:'Segoe UI';")
+        for i, line in enumerate(self._lines):
+            c = T.BLUE if i < self._step else "#EEF0F6"
+            line.setStyleSheet(f"background:{c}; border-radius:1px;")
+
+
+# ─────────────────────────────────────────────────────
+#  STEP 1 — ACCOUNT
+# ─────────────────────────────────────────────────────
+class Step1Account(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._selected_role = "Customer"
+        self._role_btns = {}
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
+
+        t = QLabel("Create your account")
+        t.setStyleSheet(f"color:{T.NAVY}; font-size:19px; font-weight:800; font-family:'Segoe UI';")
+        s = QLabel("Choose your role and set up your login credentials")
+        s.setStyleSheet(f"color:{T.MUTED}; font-size:12px; font-family:'Segoe UI';")
+        lay.addWidget(t); lay.addSpacing(3); lay.addWidget(s); lay.addSpacing(18)
+
+        # Role selector
+        lay.addWidget(FieldLabel("I am registering as")); lay.addSpacing(6)
+        row = QHBoxLayout(); row.setSpacing(8)
+        for role, icon in [("Customer","📋"), ("Agent","👤"), ("Admin","⚙️")]:
+            btn = QPushButton(f"{icon}  {role}")
+            btn.setCheckable(True); btn.setFixedHeight(42)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setChecked(role == "Customer")
+            btn.clicked.connect(lambda _, r=role: self._set_role(r))
+            self._role_btns[role] = btn
+            self._style_btn(btn, role == "Customer")
+            row.addWidget(btn)
+        lay.addLayout(row); lay.addSpacing(16)
+
+        self.email = StyledInput("you@email.com")
+        lay.addLayout(_col("Email Address", self.email)); lay.addSpacing(11)
+
+        self.username = StyledInput("e.g. johndoe92")
+        lay.addLayout(_col("Username", self.username)); lay.addSpacing(11)
+
+        # Password with eye toggle
+        self.pwd = StyledInput("Minimum 8 characters", password=True)
+        self.pwd.setStyleSheet(self.pwd.styleSheet() +
+                               "border-right:none; border-radius:9px 0 0 9px;")
+        self.eye = QPushButton("👁")
+        self.eye.setFixedSize(44, 44)
+        self.eye.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.eye.setStyleSheet(f"""
+            QPushButton {{ background:{T.WHITE}; border:1.5px solid {T.BORDER};
+                border-left:none; border-radius:0 9px 9px 0;
+                font-size:14px; color:{T.MUTED}; }}
+            QPushButton:hover {{ background:#F8F9FF; color:{T.NAVY}; }}
+        """)
+        self.eye.clicked.connect(self._toggle)
+        pwd_row = QHBoxLayout(); pwd_row.setSpacing(0)
+        pwd_row.addWidget(self.pwd); pwd_row.addWidget(self.eye)
+        lay.addWidget(FieldLabel("Password")); lay.addSpacing(5)
+        lay.addLayout(pwd_row); lay.addSpacing(11)
+
+        self.cpwd = StyledInput("Re-enter your password", password=True)
+        lay.addLayout(_col("Confirm Password", self.cpwd))
+        lay.addStretch()
+
+    def _set_role(self, role):
+        self._selected_role = role
+        for r, b in self._role_btns.items():
+            b.setChecked(r == role); self._style_btn(b, r == role)
+
+    def _style_btn(self, btn, active):
+        if active:
+            btn.setStyleSheet(f"""QPushButton {{ background:{T.ROLE_ACTIVE_BG};
+                border:2px solid {T.ROLE_ACTIVE_BD}; border-radius:9px;
+                color:{T.ROLE_ACTIVE_FG}; font-size:12px; font-weight:700;
+                font-family:'Segoe UI'; }}""")
+        else:
+            btn.setStyleSheet(f"""QPushButton {{ background:{T.WHITE};
+                border:2px solid {T.ROLE_IDLE_BD}; border-radius:9px;
+                color:{T.ROLE_IDLE_FG}; font-size:12px; font-weight:600;
+                font-family:'Segoe UI'; }}
+                QPushButton:hover {{ border-color:#C9CEED; color:{T.NAVY}; background:#F8F9FF; }}""")
+
+    def _toggle(self):
+        if self.pwd.echoMode() == QLineEdit.EchoMode.Password:
+            self.pwd.setEchoMode(QLineEdit.EchoMode.Normal); self.eye.setText("🙈")
+        else:
+            self.pwd.setEchoMode(QLineEdit.EchoMode.Password); self.eye.setText("👁")
+
+    def validate(self):
+        for w in [self.email, self.username, self.pwd, self.cpwd]:
+            w.set_error(False)
+        e = self.email.text().strip()
+        if not e or not re.match(r"[^@]+@[^@]+\.[^@]+", e):
+            self.email.set_error(True); return False, "Please enter a valid email address."
+        if len(self.username.text().strip()) < 3:
+            self.username.set_error(True); return False, "Username must be at least 3 characters."
+        if len(self.pwd.text()) < 8:
+            self.pwd.set_error(True); return False, "Password must be at least 8 characters."
+        if self.pwd.text() != self.cpwd.text():
+            self.cpwd.set_error(True); return False, "Passwords do not match."
+        return True, ""
+
+    def get_data(self):
+        return {"role": self._selected_role,
+                "email": self.email.text().strip(),
+                "username": self.username.text().strip(),
+                "password": self.pwd.text()}
+
+
+# ─────────────────────────────────────────────────────
+#  STEP 2 — PERSONAL INFO
+# ─────────────────────────────────────────────────────
+class Step2Personal(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
+
+        t = QLabel("Personal Information")
+        t.setStyleSheet(f"color:{T.NAVY}; font-size:19px; font-weight:800; font-family:'Segoe UI';")
+        s = QLabel("We need this to set up your insurance profile correctly")
+        s.setStyleSheet(f"color:{T.MUTED}; font-size:12px; font-family:'Segoe UI';")
+        lay.addWidget(t); lay.addSpacing(3); lay.addWidget(s); lay.addSpacing(18)
+
+        self.first = StyledInput("First name")
+        self.last  = StyledInput("Last name")
+        hr1 = QHBoxLayout(); hr1.setSpacing(12)
+        hr1.addLayout(_col("First Name", self.first))
+        hr1.addLayout(_col("Last Name",  self.last))
+        lay.addLayout(hr1); lay.addSpacing(11)
+
+        self.dob    = StyledDate()
+        self.gender = StyledCombo()
+        self.gender.addItems(["Male","Female","Non-binary","Prefer not to say"])
+        hr2 = QHBoxLayout(); hr2.setSpacing(12)
+        hr2.addLayout(_col("Date of Birth", self.dob))
+        hr2.addLayout(_col("Gender",        self.gender))
+        lay.addLayout(hr2); lay.addSpacing(11)
+
+        self.phone = StyledInput("+1 (555) 000-0000")
+        lay.addLayout(_col("Phone Number", self.phone)); lay.addSpacing(11)
+
+        self.address = StyledInput("Street, City, State, ZIP")
+        lay.addLayout(_col("Residential Address", self.address)); lay.addSpacing(11)
+
+        self.id_type = StyledCombo()
+        self.id_type.addItems(["Passport","Driver's License","National ID / NIN","Voter's Card"])
+        self.id_num  = StyledInput("e.g. AB1234567")
+        hr3 = QHBoxLayout(); hr3.setSpacing(12)
+        hr3.addLayout(_col("ID Type",   self.id_type))
+        hr3.addLayout(_col("ID Number", self.id_num))
+        lay.addLayout(hr3)
+        lay.addStretch()
+
+    def validate(self):
+        for w in [self.first, self.last, self.phone, self.id_num]:
+            w.set_error(False)
+        if not self.first.text().strip():
+            self.first.set_error(True); return False, "Please enter your first name."
+        if not self.last.text().strip():
+            self.last.set_error(True); return False, "Please enter your last name."
+        if not self.phone.text().strip():
+            self.phone.set_error(True); return False, "Please enter your phone number."
+        if not self.id_num.text().strip():
+            self.id_num.set_error(True); return False, "Please enter your ID number."
+        return True, ""
+
+    def get_data(self):
+        d = self.dob.date()
+        return {
+            "first_name": self.first.text().strip(),
+            "last_name":  self.last.text().strip(),
+            "full_name":  f"{self.first.text().strip()} {self.last.text().strip()}",
+            "dob":        f"{d.year()}-{d.month():02d}-{d.day():02d}",
+            "gender":     self.gender.currentText(),
+            "phone":      self.phone.text().strip(),
+            "address":    self.address.text().strip(),
+            "id_type":    self.id_type.currentText(),
+            "id_number":  self.id_num.text().strip(),
+        }
+
+
+# ─────────────────────────────────────────────────────
+#  STEP 3 — ROLE-SPECIFIC DETAILS
+# ─────────────────────────────────────────────────────
+class Step3Details(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._role = "Customer"
+        self._build()
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
+
+        self.title = QLabel("Policy Preferences")
+        self.title.setStyleSheet(f"color:{T.NAVY}; font-size:19px; font-weight:800; font-family:'Segoe UI';")
+        self.sub = QLabel("Just a few more details to complete your profile")
+        self.sub.setStyleSheet(f"color:{T.MUTED}; font-size:12px; font-family:'Segoe UI';")
+        root.addWidget(self.title); root.addSpacing(3)
+        root.addWidget(self.sub);   root.addSpacing(18)
+
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self._customer_page())  # 0
+        self.stack.addWidget(self._agent_page())     # 1
+        self.stack.addWidget(self._admin_page())     # 2
+        root.addWidget(self.stack)
+
+    def _customer_page(self):
+        p = QWidget()
+        lay = QVBoxLayout(p); lay.setContentsMargins(0,0,0,0); lay.setSpacing(11)
+
+        self.policy_type = StyledCombo()
+        self.policy_type.addItems(["Health Insurance","Life Insurance","Auto Insurance",
+                                   "Property Insurance","Travel Insurance","Not sure yet"])
+        self.occupation = StyledInput("e.g. Software Engineer, Teacher…")
+        hr1 = QHBoxLayout(); hr1.setSpacing(12)
+        hr1.addLayout(_col("Policy Type Interest", self.policy_type))
+        hr1.addLayout(_col("Occupation",           self.occupation))
+        lay.addLayout(hr1)
+
+        self.bene_name = StyledInput("Full legal name")
+        self.bene_rel  = StyledCombo()
+        self.bene_rel.addItems(["Spouse","Child","Parent","Sibling","Other Relative","Legal Guardian"])
+        hr2 = QHBoxLayout(); hr2.setSpacing(12)
+        hr2.addLayout(_col("Beneficiary Full Name",    self.bene_name))
+        hr2.addLayout(_col("Beneficiary Relationship", self.bene_rel))
+        lay.addLayout(hr2)
+
+        self.emg_name  = StyledInput("Emergency contact name")
+        self.emg_phone = StyledInput("+1 (555) 000-0000")
+        hr3 = QHBoxLayout(); hr3.setSpacing(12)
+        hr3.addLayout(_col("Emergency Contact Name",  self.emg_name))
+        hr3.addLayout(_col("Emergency Contact Phone", self.emg_phone))
+        lay.addLayout(hr3)
+
+        lay.addStretch()
+        return p
+
+    def _agent_page(self):
+        p = QWidget()
+        lay = QVBoxLayout(p); lay.setContentsMargins(0,0,0,0); lay.setSpacing(11)
+
+        self.license_no = StyledInput("e.g. INS-2024-00123")
+        self.branch     = StyledInput("e.g. Lagos Central Branch")
+        hr1 = QHBoxLayout(); hr1.setSpacing(12)
+        hr1.addLayout(_col("Insurance License No.", self.license_no))
+        hr1.addLayout(_col("Branch / Office",       self.branch))
+        lay.addLayout(hr1)
+
+        self.specialization = StyledCombo()
+        self.specialization.addItems(["General","Life Insurance","Health Insurance",
+                                      "Auto & Property","Commercial Lines"])
+        self.commission = StyledInput("e.g. 5.0")
+        hr2 = QHBoxLayout(); hr2.setSpacing(12)
+        hr2.addLayout(_col("Specialization",      self.specialization))
+        hr2.addLayout(_col("Commission Rate (%)", self.commission))
+        lay.addLayout(hr2)
+
+        self.experience = StyledCombo()
+        self.experience.addItems(["< 1 year","1–3 years","3–5 years","5–10 years","10+ years"])
+        self.supervisor = StyledInput("Supervisor name or email")
+        hr3 = QHBoxLayout(); hr3.setSpacing(12)
+        hr3.addLayout(_col("Years of Experience",  self.experience))
+        hr3.addLayout(_col("Reporting Supervisor", self.supervisor))
+        lay.addLayout(hr3)
+
+        lay.addStretch()
+        return p
+
+    def _admin_page(self):
+        p = QWidget()
+        lay = QVBoxLayout(p); lay.setContentsMargins(0,0,0,0); lay.setSpacing(11)
+
+        self.dept = StyledCombo()
+        self.dept.addItems(["Operations","Finance","IT / Systems",
+                            "Compliance & Legal","Human Resources","Executive"])
+        self.emp_id = StyledInput("e.g. EMP-2024-001")
+        hr1 = QHBoxLayout(); hr1.setSpacing(12)
+        hr1.addLayout(_col("Department",  self.dept))
+        hr1.addLayout(_col("Employee ID", self.emp_id))
+        lay.addLayout(hr1)
+
+        self.access_level = StyledCombo()
+        self.access_level.addItems(["Standard Admin","Senior Admin","Super Admin"])
+        lay.addLayout(_col("Access Level", self.access_level))
+
+        self.admin_sup = StyledInput("Supervisor name or email (optional)")
+        lay.addLayout(_col("Reporting To", self.admin_sup))
+
+        lay.addStretch()
+        return p
+
+    def set_role(self, role: str):
+        self._role = role
+        self.stack.setCurrentIndex({"Customer":0,"Agent":1,"Admin":2}.get(role, 0))
+        heads = {
+            "Customer": ("Policy Preferences",  "Complete your insurance profile"),
+            "Agent":    ("Agent Details",        "Provide your professional information"),
+            "Admin":    ("Admin Details",         "Set up your administrator profile"),
+        }
+        self.title.setText(heads[role][0])
+        self.sub.setText(heads[role][1])
+
+    def validate(self):
+        if self._role == "Agent":
+            self.license_no.set_error(False); self.branch.set_error(False)
+            if not self.license_no.text().strip():
+                self.license_no.set_error(True)
+                return False, "Insurance license number is required for agents."
+            if not self.branch.text().strip():
+                self.branch.set_error(True)
+                return False, "Please enter your branch or office."
+        return True, ""
+
+    def get_data(self):
+        if self._role == "Customer":
+            return {
+                "policy_interest":   self.policy_type.currentText(),
+                "occupation":        self.occupation.text().strip(),
+                "beneficiary_name":  self.bene_name.text().strip(),
+                "beneficiary_rel":   self.bene_rel.currentText(),
+                "emg_name":          self.emg_name.text().strip(),
+                "emg_phone":         self.emg_phone.text().strip(),
+            }
+        elif self._role == "Agent":
+            return {
+                "license_number":    self.license_no.text().strip(),
+                "branch":            self.branch.text().strip(),
+                "specialization":    self.specialization.currentText(),
+                "commission_rate":   self.commission.text().strip(),
+                "experience":        self.experience.currentText(),
+                "supervisor":        self.supervisor.text().strip(),
+            }
+        else:
+            return {
+                "department":        self.dept.currentText(),
+                "employee_id":       self.emp_id.text().strip(),
+                "access_level":      self.access_level.currentText(),
+                "supervisor":        self.admin_sup.text().strip(),
+            }
+
+
+# ─────────────────────────────────────────────────────
+#  REGISTER CARD  (3-step container)
+# ─────────────────────────────────────────────────────
+class RegisterCard(QFrame):
+    register_success = pyqtSignal(str, str)   # full_name, role
+    back_to_login    = pyqtSignal()
+
+    def __init__(self, initial_role="Customer", parent=None):
+        super().__init__(parent)
+        self.setFixedSize(560, 660)
+        self.setStyleSheet(f"QFrame {{ background:{T.WHITE}; border-radius:20px; }}")
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(60); shadow.setXOffset(0); shadow.setYOffset(16)
+        shadow.setColor(QColor(67, 97, 238, 40))
+        self.setGraphicsEffect(shadow)
+
+        self._step      = 0
+        self._data      = {}
+        self._init_role = initial_role
+        self._build()
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(40, 30, 40, 26); root.setSpacing(0)
+
+        # ── Brand + back link ──
+        top = QHBoxLayout()
+        shield = QLabel("🛡️"); shield.setFixedSize(36, 36)
+        shield.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        shield.setStyleSheet(f"background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+                             f"stop:0 {T.BLUE},stop:1 {T.BLUE_LIGHT});"
+                             f"border-radius:10px; font-size:15px;")
+        brand = QLabel(f"<span style='color:{T.NAVY};font-weight:800;'>Shield</span>"
+                       f"<span style='color:{T.BLUE};font-weight:700;'>YourInsurance</span>")
+        brand.setTextFormat(Qt.TextFormat.RichText)
+        brand.setStyleSheet("font-size:12px; font-family:'Segoe UI';")
+        bk = QPushButton("← Login")
+        bk.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        bk.setStyleSheet(f"QPushButton{{background:transparent;border:none;"
+                         f"color:{T.MUTED};font-size:11px;font-weight:600;font-family:'Segoe UI';}}"
+                         f"QPushButton:hover{{color:{T.BLUE};}}")
+        bk.clicked.connect(self.back_to_login.emit)
+        top.addWidget(shield); top.addSpacing(8); top.addWidget(brand)
+        top.addStretch(); top.addWidget(bk)
+        root.addLayout(top); root.addSpacing(20)
+
+        # ── Stepper ──
+        self.stepper = StepIndicator()
+        root.addWidget(self.stepper); root.addSpacing(18)
+
+        # ── Divider ──
+        div = QFrame(); div.setFixedHeight(1)
+        div.setStyleSheet(f"background:{T.BORDER};")
+        root.addWidget(div); root.addSpacing(18)
+
+        # ── Step pages ──
+        self.s1 = Step1Account()
+        self.s2 = Step2Personal()
+        self.s3 = Step3Details()
+        self.s1._set_role(self._init_role)
+        self.s3.set_role(self._init_role)
+
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self.s1)
+        self.pages.addWidget(self.s2)
+        self.pages.addWidget(self.s3)
+        root.addWidget(self.pages); root.addSpacing(16)
+
+        # ── Error label ──
+        self.err = QLabel("")
+        self.err.setWordWrap(True)
+        self.err.setStyleSheet(f"color:{T.ERROR}; font-size:11px; font-family:'Segoe UI';"
+                               f"background:rgba(229,88,88,0.08);"
+                               f"border:1px solid rgba(229,88,88,0.2);"
+                               f"border-radius:8px; padding:7px 10px;")
+        self.err.hide(); root.addWidget(self.err)
+
+        # ── Nav ──
+        nav = QHBoxLayout()
+        self.back_btn = QPushButton("← Back")
+        self.back_btn.setFixedHeight(46)
+        self.back_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.back_btn.setStyleSheet(f"""QPushButton {{
+                background:{T.WHITE}; border:1.5px solid {T.BORDER};
+                border-radius:10px; color:{T.NAVY};
+                font-size:13px; font-weight:700; font-family:'Segoe UI'; padding:0 24px;}}
+            QPushButton:hover {{border-color:{T.BLUE}; color:{T.BLUE}; background:#F8F9FF;}}""")
+        self.back_btn.hide()
+        self.back_btn.clicked.connect(self._prev)
+
+        self.next_btn = QPushButton("Continue  →")
+        self.next_btn.setFixedHeight(46)
+        self.next_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.next_btn.setStyleSheet(f"""QPushButton {{
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 {T.BLUE},stop:1 {T.BLUE_LIGHT});
+                color:white; border:none; border-radius:10px;
+                font-size:13px; font-weight:700; font-family:'Segoe UI'; letter-spacing:0.4px;}}
+            QPushButton:hover {{
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 {T.BLUE_DARK},stop:1 {T.BLUE});}}
+            QPushButton:disabled {{background:#C5CAE9; color:white;}}""")
+        sh = QGraphicsDropShadowEffect(); sh.setBlurRadius(18); sh.setOffset(0,6)
+        sh.setColor(QColor(67,97,238,70)); self.next_btn.setGraphicsEffect(sh)
+        self.next_btn.clicked.connect(self._next)
+        nav.addWidget(self.back_btn); nav.addStretch(); nav.addWidget(self.next_btn)
+        root.addSpacing(4); root.addLayout(nav); root.addSpacing(10)
+
+        # ── Sign-in link ──
+        sign = QHBoxLayout()
+        sign.addStretch()
+        sign.addWidget(QLabel(f"<span style='color:{T.MUTED};font-size:12px;'>"
+                              f"Already have an account?</span>").also(
+                                  lambda l: l.setTextFormat(Qt.TextFormat.RichText)))
+        si = QPushButton("Sign in")
+        si.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        si.setStyleSheet(f"QPushButton{{background:transparent;border:none;"
+                         f"color:{T.BLUE};font-size:12px;font-weight:700;"
+                         f"font-family:'Segoe UI';padding:0;}}"
+                         f"QPushButton:hover{{color:{T.BLUE_DARK};}}")
+        si.clicked.connect(self.back_to_login.emit)
+        sign.addSpacing(4); sign.addWidget(si); sign.addStretch()
+        root.addLayout(sign)
+
+    # ── Step navigation ──
+    def _next(self):
+        self.err.hide()
+        if self._step == 0:
+            ok, msg = self.s1.validate()
+            if not ok: return self._show_err(msg)
+            self._data.update(self.s1.get_data())
+            self.s3.set_role(self._data["role"])
+        elif self._step == 1:
+            ok, msg = self.s2.validate()
+            if not ok: return self._show_err(msg)
+            self._data.update(self.s2.get_data())
+        elif self._step == 2:
+            ok, msg = self.s3.validate()
+            if not ok: return self._show_err(msg)
+            self._data.update(self.s3.get_data())
+            self._submit(); return
+
+        self._step += 1; self._go(self._step)
+
+    def _prev(self):
+        self.err.hide(); self._step -= 1; self._go(self._step)
+
+    def _go(self, step):
+        self.pages.setCurrentIndex(step)
+        self.stepper.set_step(step)
+        self.back_btn.setVisible(step > 0)
+        self.next_btn.setText("Create Account  ✓" if step == 2 else "Continue  →")
+
+    def _submit(self):
+        self.next_btn.setText("Creating account…"); self.next_btn.setEnabled(False)
+        QTimer.singleShot(300, self._do_register)
+
+    def _do_register(self):
+        ok, msg = register_user(self._data)
+        self.next_btn.setText("Create Account  ✓"); self.next_btn.setEnabled(True)
+        if ok:
+            self.register_success.emit(self._data.get("full_name","User"),
+                                       self._data.get("role","Customer"))
+        else:
+            self._show_err(msg); self._step = 0; self._go(0)
+
+    def _show_err(self, msg):
+        self.err.setText(f"⚠  {msg}"); self.err.show()
+
+
+# Tiny helper so QLabel chain works inline
+QLabel.also = lambda self, fn: (fn(self), self)[1]
+
+
+# ─────────────────────────────────────────────────────
+#  BACKGROUND CANVAS
+# ─────────────────────────────────────────────────────
+class BgCanvas(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def paintEvent(self, _):
+        p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.fillRect(self.rect(), QBrush(QColor(T.BG)))
+        g1 = QRadialGradient(self.width()*.9, self.height()*.1, 260)
+        g1.setColorAt(0, QColor(67,97,238,25)); g1.setColorAt(1, QColor(67,97,238,0))
+        p.setBrush(QBrush(g1)); p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(int(self.width()*.9)-260, int(self.height()*.1)-260, 520, 520)
+        g2 = QRadialGradient(self.width()*.05, self.height()*.9, 200)
+        g2.setColorAt(0, QColor(124,111,255,20)); g2.setColorAt(1, QColor(124,111,255,0))
+        p.setBrush(QBrush(g2))
+        p.drawEllipse(int(self.width()*.05)-200, int(self.height()*.9)-200, 400, 400)
+
+
+# ─────────────────────────────────────────────────────
+#  REGISTER WINDOW
+# ─────────────────────────────────────────────────────
+class RegisterWindow(QWidget):
+    back_to_login = pyqtSignal()
+
+    def __init__(self, role="Customer", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("ShieldYourInsurance — Register")
+        self.setFixedSize(680, 740)
+
+        self.bg = BgCanvas(self); self.bg.setGeometry(0, 0, 680, 740)
+
+        self.card = RegisterCard(initial_role=role, parent=self)
+        self.card.move((680-560)//2, (740-660)//2)
+        self.card.register_success.connect(self._on_success)
+        self.card.back_to_login.connect(self.back_to_login.emit)
+
+        self.setWindowOpacity(0.0)
+        self._anim = QPropertyAnimation(self, b"windowOpacity")
+        self._anim.setDuration(400); self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0); self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def showEvent(self, e):
+        super().showEvent(e); self._anim.start()
+
+    def _on_success(self, name: str, role: str):
+        icons = {"Customer":"📋","Agent":"👤","Admin":"⚙️"}
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Registration Successful!")
+        msg.setText(
+            f"<b style='font-size:15px;'>{icons.get(role,'🎉')} &nbsp;Welcome, {name}!</b><br/><br/>"
+            f"Your <b style='color:{T.BLUE};'>{role}</b> account has been created.<br/>"
+            f"You can now sign in with your credentials.<br/><br/>"
+            f"<small style='color:{T.MUTED};'>Returning to login…</small>"
+        )
+        msg.setTextFormat(Qt.TextFormat.RichText); msg.exec()
+        self.back_to_login.emit()
+
+
+# ─────────────────────────────────────────────────────
+#  RUN
+# ─────────────────────────────────────────────────────
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setFont(QFont("Segoe UI", 10))
+    app.setStyle("Fusion")
+    win = RegisterWindow(role="Customer")
+    win.show()
+    sys.exit(app.exec())
