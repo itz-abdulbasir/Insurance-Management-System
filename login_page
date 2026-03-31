@@ -1,0 +1,524 @@
+"""
+login_view.py — ShieldIMS
+Clean Minimal Login  |  PyQt6  |  3 Roles: Admin · Agent · Customer
+"""
+
+import sys
+import bcrypt
+import mysql.connector
+from mysql.connector import Error
+
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton, QLineEdit,
+    QVBoxLayout, QHBoxLayout, QFrame, QCheckBox,
+    QGraphicsDropShadowEffect, QMessageBox, QSizePolicy
+)
+from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve, pyqtSignal, QTimer
+from PyQt6.QtGui import QFont, QColor, QPainter, QBrush, QLinearGradient, QRadialGradient, QCursor
+
+
+# ──────────────────────────────────────────────────────────────
+#  THEME
+# ──────────────────────────────────────────────────────────────
+class T:
+    BG             = "#FAFBFF"
+    WHITE          = "#FFFFFF"
+    BLUE           = "#4361EE"
+    BLUE_DARK      = "#3451D1"
+    BLUE_LIGHT     = "#7C6FFF"
+    NAVY           = "#1A1D2E"
+    MUTED          = "#9DA3B4"
+    BORDER         = "#EEF0F6"
+    BORDER_FOCUS   = "#4361EE"
+    ERROR          = "#E55858"
+    ROLE_ACTIVE_BG = "#F0F3FF"
+    ROLE_ACTIVE_BD = "#4361EE"
+    ROLE_ACTIVE_FG = "#4361EE"
+    ROLE_IDLE_BD   = "#EEF0F6"
+    ROLE_IDLE_FG   = "#9DA3B4"
+
+
+# ──────────────────────────────────────────────────────────────
+#  DATABASE AUTH
+# ──────────────────────────────────────────────────────────────
+DB_CONFIG = {
+    "host":     "localhost",
+    "port":     3306,
+    "database": "insurance_db",
+    "user":     "app_user",
+    "password": "your_password",
+}
+
+def authenticate_user(email: str, password: str, role: str):
+    """
+    Checks MySQL for user with matching email + role, then bcrypt-verifies password.
+    Falls back to demo credentials if DB is not yet connected.
+    """
+    try:
+        conn   = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT * FROM users WHERE email = %s AND role = %s AND is_active = 1",
+            (email, role.lower())
+        )
+        user = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if user and bcrypt.checkpw(password.encode(), user["password"].encode()):
+            return user
+        return None
+    except Error:
+        return _demo_auth(email, password, role)
+
+
+def _demo_auth(email, password, role):
+    """Demo logins when MySQL is not yet set up."""
+    DEMO = {
+        "Admin":    ("admin@ims.com",    "admin123"),
+        "Agent":    ("agent@ims.com",    "agent123"),
+        "Customer": ("customer@ims.com", "cust123"),
+    }
+    if role in DEMO:
+        d_email, d_pass = DEMO[role]
+        if email == d_email and password == d_pass:
+            return {"id": 1, "full_name": f"Demo {role}", "email": email, "role": role.lower()}
+    return None
+
+
+# ──────────────────────────────────────────────────────────────
+#  SESSION SINGLETON
+# ──────────────────────────────────────────────────────────────
+class CurrentSession:
+    _user = None
+
+    @classmethod
+    def start(cls, user: dict):
+        cls._user = user
+
+    @classmethod
+    def get(cls):
+        return cls._user
+
+    @classmethod
+    def role(cls):
+        return cls._user["role"] if cls._user else None
+
+    @classmethod
+    def clear(cls):
+        cls._user = None
+
+
+# ──────────────────────────────────────────────────────────────
+#  ROLE BUTTON
+# ──────────────────────────────────────────────────────────────
+class RoleButton(QPushButton):
+    def __init__(self, label, icon, parent=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setFixedHeight(44)
+        self.setText(f"{icon}  {label}")
+        self._refresh(False)
+        self.toggled.connect(self._refresh)
+
+    def _refresh(self, active):
+        if active:
+            self.setStyleSheet(f"""
+                QPushButton {{
+                    background: {T.ROLE_ACTIVE_BG};
+                    border: 2px solid {T.ROLE_ACTIVE_BD};
+                    border-radius: 10px;
+                    color: {T.ROLE_ACTIVE_FG};
+                    font-size: 12px;
+                    font-weight: 700;
+                    font-family: 'Segoe UI', sans-serif;
+                }}
+            """)
+        else:
+            self.setStyleSheet(f"""
+                QPushButton {{
+                    background: {T.WHITE};
+                    border: 2px solid {T.ROLE_IDLE_BD};
+                    border-radius: 10px;
+                    color: {T.ROLE_IDLE_FG};
+                    font-size: 12px;
+                    font-weight: 600;
+                    font-family: 'Segoe UI', sans-serif;
+                }}
+                QPushButton:hover {{
+                    border-color: #C9CEED;
+                    color: {T.NAVY};
+                    background: #F8F9FF;
+                }}
+            """)
+
+
+# ──────────────────────────────────────────────────────────────
+#  STYLED INPUT
+# ──────────────────────────────────────────────────────────────
+class StyledInput(QLineEdit):
+    def __init__(self, placeholder="", password=False, parent=None):
+        super().__init__(parent)
+        self.setPlaceholderText(placeholder)
+        self.setFixedHeight(48)
+        if password:
+            self.setEchoMode(QLineEdit.EchoMode.Password)
+        self._refresh(False)
+
+    def focusInEvent(self, e):
+        self._refresh(True)
+        super().focusInEvent(e)
+
+    def focusOutEvent(self, e):
+        self._refresh(False)
+        super().focusOutEvent(e)
+
+    def _refresh(self, focused):
+        border = T.BORDER_FOCUS if focused else T.BORDER
+        self.setStyleSheet(f"""
+            QLineEdit {{
+                border: 1.5px solid {border};
+                border-radius: 10px;
+                padding: 0 14px;
+                font-size: 13px;
+                color: {T.NAVY};
+                background: {T.WHITE};
+                font-family: 'Segoe UI', sans-serif;
+            }}
+        """)
+
+
+# ──────────────────────────────────────────────────────────────
+#  BACKGROUND (soft radial glow blobs)
+# ──────────────────────────────────────────────────────────────
+class BgCanvas(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.fillRect(self.rect(), QBrush(QColor(T.BG)))
+
+        # top-right blue blob
+        g1 = QRadialGradient(self.width() * 0.88, self.height() * 0.12, 240)
+        g1.setColorAt(0.0, QColor(67, 97, 238, 30))
+        g1.setColorAt(1.0, QColor(67, 97, 238, 0))
+        p.setBrush(QBrush(g1))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(int(self.width() * 0.88) - 240, int(self.height() * 0.12) - 240, 480, 480)
+
+        # bottom-left purple blob
+        g2 = QRadialGradient(self.width() * 0.08, self.height() * 0.88, 200)
+        g2.setColorAt(0.0, QColor(124, 111, 255, 22))
+        g2.setColorAt(1.0, QColor(124, 111, 255, 0))
+        p.setBrush(QBrush(g2))
+        p.drawEllipse(int(self.width() * 0.08) - 200, int(self.height() * 0.88) - 200, 400, 400)
+
+
+# ──────────────────────────────────────────────────────────────
+#  LOGIN CARD
+# ──────────────────────────────────────────────────────────────
+class LoginCard(QFrame):
+    login_success = pyqtSignal(dict)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(400, 570)
+        self.setStyleSheet(f"QFrame {{ background: {T.WHITE}; border-radius: 20px; }}")
+
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(55)
+        shadow.setXOffset(0)
+        shadow.setYOffset(14)
+        shadow.setColor(QColor(67, 97, 238, 45))
+        self.setGraphicsEffect(shadow)
+
+        self._selected_role = "Admin"
+        self._role_btns = {}
+        self._build()
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(36, 36, 36, 32)
+        root.setSpacing(0)
+
+        # ── Logo row ──
+        logo_row = QHBoxLayout()
+        shield = QLabel("🛡️")
+        shield.setFixedSize(40, 40)
+        shield.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        shield.setStyleSheet(f"""
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+                stop:0 {T.BLUE}, stop:1 {T.BLUE_LIGHT});
+            border-radius: 11px; font-size: 17px;
+        """)
+        brand = QLabel(f"Shield<span style='color:{T.BLUE};'>IMS</span>")
+        brand.setTextFormat(Qt.TextFormat.RichText)
+        brand.setStyleSheet(f"color:{T.NAVY}; font-size:15px; font-weight:700; font-family:'Segoe UI';")
+        logo_row.addWidget(shield)
+        logo_row.addSpacing(10)
+        logo_row.addWidget(brand)
+        logo_row.addStretch()
+        root.addLayout(logo_row)
+        root.addSpacing(26)
+
+        # ── Title ──
+        title = QLabel("Sign in")
+        title.setStyleSheet(f"color:{T.NAVY}; font-size:25px; font-weight:700; font-family:'Segoe UI';")
+        root.addWidget(title)
+        root.addSpacing(3)
+
+        sub = QLabel("Select your role and enter your credentials")
+        sub.setStyleSheet(f"color:{T.MUTED}; font-size:12px; font-family:'Segoe UI';")
+        root.addWidget(sub)
+        root.addSpacing(20)
+
+        # ── Role buttons ──
+        roles_row = QHBoxLayout()
+        roles_row.setSpacing(8)
+        for role, icon in [("Admin", "⚙️"), ("Agent", "👤"), ("Customer", "📋")]:
+            btn = RoleButton(role, icon)
+            btn.setChecked(role == "Admin")
+            btn.clicked.connect(lambda _, r=role: self._set_role(r))
+            self._role_btns[role] = btn
+            roles_row.addWidget(btn)
+        root.addLayout(roles_row)
+        root.addSpacing(20)
+
+        # ── Email ──
+        root.addWidget(self._lbl("Email Address"))
+        root.addSpacing(5)
+        self.email_in = StyledInput("you@company.com")
+        root.addWidget(self.email_in)
+        root.addSpacing(14)
+
+        # ── Password + eye ──
+        root.addWidget(self._lbl("Password"))
+        root.addSpacing(5)
+
+        pwd_row = QHBoxLayout()
+        pwd_row.setSpacing(0)
+        self.pwd_in = StyledInput("Enter your password", password=True)
+        self.pwd_in.setStyleSheet(self.pwd_in.styleSheet() + "border-right:none; border-radius:10px 0 0 10px;")
+
+        self.eye = QPushButton("👁")
+        self.eye.setFixedSize(48, 48)
+        self.eye.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.eye.setStyleSheet(f"""
+            QPushButton {{
+                background:{T.WHITE}; border:1.5px solid {T.BORDER};
+                border-left:none; border-radius:0 10px 10px 0;
+                font-size:15px; color:{T.MUTED};
+            }}
+            QPushButton:hover {{ background:#F8F9FF; color:{T.NAVY}; }}
+        """)
+        self.eye.clicked.connect(self._toggle_pwd)
+        pwd_row.addWidget(self.pwd_in)
+        pwd_row.addWidget(self.eye)
+        root.addLayout(pwd_row)
+        root.addSpacing(10)
+
+        # ── Remember / Forgot ──
+        opt_row = QHBoxLayout()
+        self.remember = QCheckBox("Remember me")
+        self.remember.setStyleSheet(f"color:{T.MUTED}; font-size:12px; font-family:'Segoe UI';")
+        forgot = QLabel(f'<a href="#" style="color:{T.BLUE};font-weight:700;text-decoration:none;font-size:12px;">Forgot password?</a>')
+        forgot.setTextFormat(Qt.TextFormat.RichText)
+        forgot.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        opt_row.addWidget(self.remember)
+        opt_row.addStretch()
+        opt_row.addWidget(forgot)
+        root.addLayout(opt_row)
+        root.addSpacing(14)
+
+        # ── Error label ──
+        self.err = QLabel("")
+        self.err.setWordWrap(True)
+        self.err.setStyleSheet(f"""
+            color:{T.ERROR}; font-size:11px; font-family:'Segoe UI';
+            background:rgba(229,88,88,0.08);
+            border:1px solid rgba(229,88,88,0.2);
+            border-radius:8px; padding:6px 10px;
+        """)
+        self.err.hide()
+        root.addWidget(self.err)
+
+        # ── Sign In button ──
+        self.btn = QPushButton("Sign In  →")
+        self.btn.setFixedHeight(50)
+        self.btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn.setStyleSheet(f"""
+            QPushButton {{
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 {T.BLUE}, stop:1 {T.BLUE_LIGHT});
+                color: white; border: none; border-radius: 12px;
+                font-size: 14px; font-weight: 700;
+                font-family: 'Segoe UI', sans-serif;
+                letter-spacing: 0.5px;
+            }}
+            QPushButton:hover {{
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 {T.BLUE_DARK}, stop:1 {T.BLUE});
+            }}
+            QPushButton:pressed {{ background: {T.BLUE_DARK}; }}
+            QPushButton:disabled {{ background: #C5CAE9; color: white; }}
+        """)
+        btn_shadow = QGraphicsDropShadowEffect()
+        btn_shadow.setBlurRadius(22)
+        btn_shadow.setOffset(0, 7)
+        btn_shadow.setColor(QColor(67, 97, 238, 75))
+        self.btn.setGraphicsEffect(btn_shadow)
+        self.btn.clicked.connect(self._try_login)
+        root.addSpacing(4)
+        root.addWidget(self.btn)
+        root.addSpacing(16)
+
+        # ── Footer ──
+        secure = QLabel("🔒  Secured with bcrypt encryption & role-based access control")
+        secure.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        secure.setStyleSheet(f"color:{T.MUTED}; font-size:10px; font-family:'Segoe UI';")
+        root.addWidget(secure)
+        root.addSpacing(4)
+
+        hint = QLabel(
+            "Demo: admin@ims.com / admin123  ·  agent@ims.com / agent123  ·  customer@ims.com / cust123"
+        )
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#D0D5EE; font-size:9px; font-family:'Segoe UI';")
+        root.addWidget(hint)
+
+    # ── helpers ──
+    def _lbl(self, text):
+        l = QLabel(text)
+        l.setStyleSheet(f"color:{T.NAVY}; font-size:11px; font-weight:700; font-family:'Segoe UI'; letter-spacing:0.3px;")
+        return l
+
+    def _set_role(self, role):
+        self._selected_role = role
+        for r, b in self._role_btns.items():
+            b.setChecked(r == role)
+        self.err.hide()
+
+    def _toggle_pwd(self):
+        if self.pwd_in.echoMode() == QLineEdit.EchoMode.Password:
+            self.pwd_in.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.eye.setText("🙈")
+        else:
+            self.pwd_in.setEchoMode(QLineEdit.EchoMode.Password)
+            self.eye.setText("👁")
+
+    def _try_login(self):
+        email = self.email_in.text().strip()
+        pwd   = self.pwd_in.text()
+        self.err.hide()
+
+        if not email:
+            self._show_err("Please enter your email address.")
+            self.email_in.setFocus()
+            return
+        if not pwd:
+            self._show_err("Please enter your password.")
+            self.pwd_in.setFocus()
+            return
+
+        self.btn.setText("Signing in…")
+        self.btn.setEnabled(False)
+        QTimer.singleShot(250, lambda: self._do_auth(email, pwd, self._selected_role))
+
+    def _do_auth(self, email, pwd, role):
+        user = authenticate_user(email, pwd, role)
+        self.btn.setText("Sign In  →")
+        self.btn.setEnabled(True)
+
+        if user:
+            CurrentSession.start(user)
+            self.login_success.emit(user)
+        else:
+            self._show_err(f"Incorrect email or password for {role}. Please try again.")
+            self.pwd_in.clear()
+            self.pwd_in.setFocus()
+
+    def _show_err(self, msg):
+        self.err.setText(f"⚠  {msg}")
+        self.err.show()
+
+
+# ──────────────────────────────────────────────────────────────
+#  LOGIN WINDOW
+# ──────────────────────────────────────────────────────────────
+class LoginWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("ShieldIMS — Sign In")
+        self.setFixedSize(760, 620)
+
+        self.bg = BgCanvas(self)
+        self.bg.setGeometry(0, 0, 760, 620)
+
+        self.card = LoginCard(self)
+        cx = (760 - 400) // 2
+        cy = (620 - 570) // 2
+        self.card.move(cx, cy)
+        self.card.login_success.connect(self._on_login)
+
+        # Fade-in
+        self.setWindowOpacity(0.0)
+        self._anim = QPropertyAnimation(self, b"windowOpacity")
+        self._anim.setDuration(450)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._anim.start()
+
+    def _on_login(self, user: dict):
+        role = user["role"]
+        name = user.get("full_name", "User")
+
+        # ── Route to the correct dashboard ──
+        if role == "admin":
+            self._open("Admin Dashboard", name, "⚙️", "#4361EE")
+
+        elif role == "agent":
+            self._open("Agent Dashboard", name, "👤", "#27AE60")
+
+        elif role == "customer":
+            self._open("Customer Portal", name, "📋", "#E08B60")
+
+    def _open(self, dashboard, name, icon, color):
+        """
+        Stub — replace with your real dashboard window.
+
+        Example:
+            self.close()
+            from views.admin_dashboard import AdminDashboard
+            self._dash = AdminDashboard()
+            self._dash.show()
+        """
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Authenticated")
+        msg.setText(
+            f"<b style='font-size:15px;'>{icon} &nbsp;Welcome, {name}!</b><br/><br/>"
+            f"Opening <b style='color:{color};'>{dashboard}</b>…<br/><br/>"
+            f"<small style='color:#9DA3B4;'>Plug your real window into "
+            f"<code>LoginWindow._open()</code></small>"
+        )
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.exec()
+
+
+# ──────────────────────────────────────────────────────────────
+#  RUN
+# ──────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setFont(QFont("Segoe UI", 10))
+    app.setStyle("Fusion")
+    win = LoginWindow()
+    win.show()
+    sys.exit(app.exec())
