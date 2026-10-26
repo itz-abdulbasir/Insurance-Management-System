@@ -1,0 +1,99 @@
+# ==============================================================================
+# Git Ignore - Insurance Management System (IMS)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Python Environment & Virtual Environments
+# ------------------------------------------------------------------------------
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+bin/
+include/
+lib/
+Lib/
+Scripts/
+pyvenv.cfg
+
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+
+# ------------------------------------------------------------------------------
+# 2. Python Bytecode, Caches & Internals
+# ------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ------------------------------------------------------------------------------
+# 3. IDEs, Editors & OS Files
+# ------------------------------------------------------------------------------
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ------------------------------------------------------------------------------
+# 4. PyInstaller & Build Artifacts
+# ------------------------------------------------------------------------------
+build/
+dist/
+**/build/
+**/dist/
+*.spec
+*.pkg
+*.pyz
+*.toc
+*.manifest
+
+# ------------------------------------------------------------------------------
+# 5. Compressed Archives & Distribution Bundles
+# ------------------------------------------------------------------------------
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+IMS_Source_Code.zip
+
+# ------------------------------------------------------------------------------
+# 6. SQLite Databases & Local Storage
+# Exclude active database instances, runtime journals, and lock files
+# ------------------------------------------------------------------------------
+*.sqlite3
+*.sqlite
+*.db
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.db-journal
+*.db-wal
+
+# Keep the schema SQL definition tracked for automated db initialization
+!IMS/db/schema.sql
+
+# Keep .gitkeep in db if present
+!.gitkeep
+
+# ------------------------------------------------------------------------------
+# 7. Generated Reports & Local User Exports (Runtime Output)
+# ------------------------------------------------------------------------------
+IMS/exports/*.pdf
+docs/*.pdf
+*.log
